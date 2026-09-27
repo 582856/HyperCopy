@@ -52,7 +52,7 @@ object ClipboardTextHandler {
         if (settingsRepository.readSystemLinkHandling()) {
             val systemJump = SystemLinkHandler.createJump(appContext, input)
             if (systemJump != null && !shouldIgnoreJump(source, systemJump.packageName, ignoreJumpApp)) {
-                submitJump(appContext, systemJump, settingsRepository.readSystemLinkClearClipboardAfterJump())
+                submitJump(appContext, systemJump, settingsRepository.readSystemLinkClearClipboardAfterJump(), input)
                 return claim(true)
             }
         }
@@ -72,6 +72,7 @@ object ClipboardTextHandler {
                     packageName = targetPackageName,
                 ),
                 match.rule.clearClipboardAfterJump,
+                input,
             )
             return claim(true)
         }
@@ -95,6 +96,7 @@ object ClipboardTextHandler {
                         packageName = targetPackageName,
                     ),
                     rule.clearClipboardAfterJump,
+                    input,
                 )
                 return claim(true)
             }
@@ -132,6 +134,7 @@ object ClipboardTextHandler {
                         packageName = targetPackageName,
                     ),
                     rule.clearClipboardAfterJump,
+                    input,
                 )
             }
             return
@@ -144,12 +147,13 @@ object ClipboardTextHandler {
                 packageName = rule.target.packageName,
             ),
             rule.clearClipboardAfterJump,
+            input,
         )
     }
 
-    private fun submitJump(context: Context, jump: PendingJump, clearClipboardAfterJump: Boolean) {
+    private fun submitJump(context: Context, jump: PendingJump, clearClipboardAfterJump: Boolean, originalText: String) {
         HyperLog.d(TAG, "submit jump notification: target=${jump.packageName}")
-        PendingJumpCoordinator.submit(context, jump, clearClipboardAfterJump)
+        PendingJumpCoordinator.submit(context, jump, clearClipboardAfterJump, originalText)
     }
 
     private fun claim(value: Boolean): Boolean {

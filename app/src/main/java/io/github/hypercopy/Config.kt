@@ -31,8 +31,11 @@ object Config {
     const val EXTRA_CLIPBOARD_SOURCE = "io.github.hypercopy.extra.CLIPBOARD_SOURCE"
     const val EXTRA_PENDING_JUMP_ID = "io.github.hypercopy.extra.PENDING_JUMP_ID"
     const val EXTRA_PENDING_JUMP_USER_ID = "io.github.hypercopy.extra.PENDING_JUMP_USER_ID"
+    const val EXTRA_AICR_TARGET_TEXT = "io.github.hypercopy.extra.AICR_TARGET_TEXT"
+    const val EXTRA_AICR_TARGET_PACKAGE = "io.github.hypercopy.extra.AICR_TARGET_PACKAGE"
     const val CLIPBOARD_MATCH_PROVIDER_AUTHORITY = "io.github.hypercopy.clipboard.match"
     const val CLIPBOARD_MATCH_PROVIDER_METHOD = "handle_matched_clipboard"
+    const val CLIPBOARD_MATCH_PROVIDER_TARGET_METHOD = "take_copy_direct_target"
     const val CLIPBOARD_MATCH_PROVIDER_RESULT = "handled"
 
     const val LOG_LEVEL_OFF = 0

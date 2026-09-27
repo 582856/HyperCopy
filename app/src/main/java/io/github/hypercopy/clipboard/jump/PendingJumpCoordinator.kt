@@ -49,7 +49,7 @@ object PendingJumpCoordinator {
     @Volatile
     private var pending: Entry? = null
 
-    fun submit(context: Context, jump: PendingJump, clearClipboardAfterJump: Boolean = false) {
+    fun submit(context: Context, jump: PendingJump, clearClipboardAfterJump: Boolean = false, originalText: String = "") {
         val appContext = context.applicationContext
         val notificationMode = SettingsRepository(appContext).readJumpNotificationMode()
         if (notificationMode == Config.JUMP_NOTIFICATION_MODE_NONE) {
@@ -59,7 +59,7 @@ object PendingJumpCoordinator {
         if (notificationMode == Config.JUMP_NOTIFICATION_MODE_SYSTEM_COPY) {
             pending?.cancel(appContext)
             pending = null
-            if (MiuiSystemCopy.copy(appContext, jump)) return
+            if (MiuiSystemCopy.copy(jump, originalText)) return
             HyperLog.d(TAG, "system copy jump unavailable, falling back to notification")
         }
         if (!canPostNotification(appContext)) {

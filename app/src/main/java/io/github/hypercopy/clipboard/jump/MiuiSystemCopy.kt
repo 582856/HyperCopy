@@ -1,16 +1,16 @@
 package io.github.hypercopy.clipboard.jump
 
-import android.content.ClipData
-import android.content.Context
 import android.content.Intent
 import io.github.hypercopy.HyperLog
+import java.util.concurrent.ConcurrentHashMap
 
-/** Marks a clipboard write so the LSPosed system hook can invoke MIUI ContentExtension. */
+/** Sends the resolved target to Xiaomi AICR's native copy-direct bubble. */
 object MiuiSystemCopy {
     private const val TAG = "HyperCopy"
-    const val CLIP_LABEL = "HyperCopySystemCopy"
+    private const val EXPIRE_MILLIS = 10_000L
+    private val targets = ConcurrentHashMap<String, Target>()
 
-    fun copy(context: Context, jump: PendingJump): Boolean {
+    fun copy(jump: PendingJump, originalText: String): Boolean {
         val text = when (jump) {
             is PendingJump.IntentJump -> jump.intent.dataString
                 ?: jump.intent.getStringExtra(Intent.EXTRA_TEXT)
@@ -21,26 +21,20 @@ object MiuiSystemCopy {
             HyperLog.d(TAG, "system copy jump has no URL/text")
             return false
         }
+        val source = originalText.trim()
+        if (source.isEmpty() || jump.packageName.isBlank()) return false
 
-        if (SystemCopyOverlayService.start(context, jump)) {
-            HyperLog.d(TAG, "system copy overlay requested for ${jump.packageName}")
-            return true
-        }
-
-        return write(context, CLIP_LABEL, text)
+        val now = System.currentTimeMillis()
+        targets.entries.removeIf { it.value.expiresAt < now }
+        targets[source] = Target(text, jump.packageName, now + EXPIRE_MILLIS)
+        HyperLog.d(TAG, "system copy-direct target cached for AICR")
+        return true
     }
 
-    private fun write(context: Context, label: String, text: String): Boolean {
-        return runCatching {
-            val clipboard = context.applicationContext.getSystemService(Context.CLIPBOARD_SERVICE)
-                as? android.content.ClipboardManager
-                ?: return false
-            clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
-            HyperLog.d(TAG, "clipboard replay marked for MIUI ContentExtension, label=$label, length=${text.length}")
-            true
-        }.getOrElse { throwable ->
-            HyperLog.d(TAG, "system copy jump failed", throwable)
-            false
-        }
+    fun takeTarget(originalText: String): Target? {
+        val target = targets.remove(originalText.trim()) ?: return null
+        return target.takeIf { it.expiresAt >= System.currentTimeMillis() }
     }
+
+    data class Target(val text: String, val packageName: String, val expiresAt: Long)
 }

@@ -8,17 +8,28 @@ import android.os.Binder
 import android.os.Bundle
 import android.os.Process
 import io.github.hypercopy.Config
+import io.github.hypercopy.clipboard.jump.MiuiSystemCopy
 
 class ClipboardMatchProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
-        if (method != Config.CLIPBOARD_MATCH_PROVIDER_METHOD) return super.call(method, arg, extras)
+        if (method != Config.CLIPBOARD_MATCH_PROVIDER_METHOD &&
+            method != Config.CLIPBOARD_MATCH_PROVIDER_TARGET_METHOD
+        ) return super.call(method, arg, extras)
         val appContext = context?.applicationContext ?: return result(false)
         val callingUid = Binder.getCallingUid()
         val packages = appContext.packageManager.getPackagesForUid(callingUid).orEmpty()
         if (callingUid != Process.SYSTEM_UID && AICR_PACKAGE !in packages) return result(false)
-        return result(ClipboardTextHandler.handle(appContext, arg.orEmpty(), ""))
+        if (method == Config.CLIPBOARD_MATCH_PROVIDER_TARGET_METHOD) {
+            val target = MiuiSystemCopy.takeTarget(arg.orEmpty()) ?: return Bundle()
+            return Bundle().apply {
+                putString(Config.EXTRA_AICR_TARGET_TEXT, target.text)
+                putString(Config.EXTRA_AICR_TARGET_PACKAGE, target.packageName)
+            }
+        }
+        val source = extras?.getString(Config.EXTRA_CLIPBOARD_SOURCE).orEmpty()
+        return result(ClipboardTextHandler.handle(appContext, arg.orEmpty(), source))
     }
 
     override fun query(

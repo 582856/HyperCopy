@@ -2,7 +2,6 @@
 <resources>
     <string-array name="xposed_scope">
         <item>android</item>
-        <item>com.miui.contentextension</item>
         <item>com.xiaomi.aicr</item>
     </string-array>
 </resources>

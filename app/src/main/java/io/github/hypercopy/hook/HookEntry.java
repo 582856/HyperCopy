@@ -3,26 +3,34 @@ package io.github.hypercopy.hook;
 import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.BroadcastReceiver;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ClipboardManager;
 import android.app.Activity;
 import android.app.Application;
+import android.graphics.Insets;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -32,26 +40,34 @@ import io.github.libxposed.api.XposedModule;
 public class HookEntry extends XposedModule {
     private static final String TAG = "HyperCopy";
     private static final String CLIPBOARD_SERVICE_CLASS = "com.android.server.clipboard.ClipboardService";
-    private static final String RECEIVER_CLASS = "io.github.hypercopy.clipboard.handling.ClipboardTextReceiver";
-    private static final String SERVICE_CLASS = "io.github.hypercopy.clipboard.handling.ClipboardTextService";
     private static final long DUPLICATE_WINDOW_MILLIS = 1500L;
     private static final int INSTALL_RETRY_LIMIT = 20;
     private static final long INSTALL_RETRY_DELAY_MILLIS = 1000L;
     private static final int CLEAR_RECEIVER_RETRY_LIMIT = 30;
     private static final long CLEAR_RECEIVER_RETRY_DELAY_MILLIS = 1000L;
-    private static final String CONTENT_EXTENSION_ACTION = "miui.intent.action.TEXT_CONTENT_EXTENSION";
-    private static final String CONTENT_EXTENSION_PACKAGE = "com.miui.contentextension";
-    private static final String CONTENT_EXTENSION_EXTRA = "clipboard_data";
     private static final String AICR_PACKAGE = "com.xiaomi.aicr";
+    private static final String AICR_PROCESS = "com.xiaomi.aicr:cognitionService";
+    private static final String AICR_BUBBLE_MANAGER = "rm0";
+    private static final String AICR_CLICK_RECORDER = "ig8";
+    private static final String AICR_BUBBLE_CONTAINER =
+        "com.xiaomi.ai.bubble.core.bubbleview.view.BubbleContainerView";
+    private static final String SYSTEM_THEME_FONT_PATH = "/data/system/theme/fonts/Miui-Regular.ttf";
+    private static final long AICR_CLICK_WINDOW_MILLIS = 4_000L;
+    private static final long AICR_TARGET_WINDOW_MILLIS = 10_000L;
 
     private static String lastText = "";
     private static long lastSentAt = 0L;
-    private static String lastSystemCopyText = "";
-    private static long lastSystemCopyAt = 0L;
     private boolean hooksInstalled = false;
     private boolean aicrAttachHookInstalled = false;
-    private boolean aicrClipboardHookInstalled = false;
+    private boolean aicrHooksInstalled = false;
     private Context aicrContext;
+    private Typeface systemThemeTypeface;
+    private volatile String lastAicrClipboardText = "";
+    private volatile float lastAicrClickY = -1f;
+    private volatile long lastAicrClickAt = 0L;
+    private final ConcurrentHashMap<String, PendingAicrTarget> aicrCueTargets = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Float> aicrCuePositions = new ConcurrentHashMap<>();
+    private final Set<String> aicrCopyCueIds = ConcurrentHashMap.newKeySet();
     private boolean clearReceiverRegistered = false;
 
     @Override
@@ -81,11 +97,12 @@ public class HookEntry extends XposedModule {
             hook(attach).setId("hypercopy_aicr_attach").intercept(chain -> {
                 Object context = chain.getArg(0);
                 Object result = chain.proceed();
+                if (!AICR_PROCESS.equals(Application.getProcessName())) return result;
                 if (context instanceof Context) {
                     Context applicationContext = ((Context) context).getApplicationContext();
                     aicrContext = applicationContext != null ? applicationContext : (Context) context;
                 }
-                installAicrClipboardHook();
+                installAicrHooks();
                 return result;
             });
             aicrAttachHookInstalled = true;
@@ -95,36 +112,103 @@ public class HookEntry extends XposedModule {
         }
     }
 
-    private void installAicrClipboardHook() {
-        if (aicrClipboardHookInstalled) return;
+    private void installAicrHooks() {
+        if (aicrHooksInstalled || aicrContext == null) return;
         try {
             Method getPrimaryClip = ClipboardManager.class.getDeclaredMethod("getPrimaryClip");
             getPrimaryClip.setAccessible(true);
             hook(getPrimaryClip).setId("hypercopy_aicr_get_primary_clip").intercept(chain -> {
                 Object result = chain.proceed();
-                if (result instanceof ClipData && shouldUseCustomJumpMode()
-                    && handleClipboardThroughApp((ClipData) result)) {
-                    logDebug("blocked matched clipboard from AICR");
+                if (!(result instanceof ClipData) || !shouldUseCustomJumpMode()) return result;
+                String clipboardText = firstClipText((ClipData) result);
+                if (!clipboardText.isEmpty()) {
+                    lastAicrClipboardText = clipboardText;
+                }
+                if (handleClipboardThroughApp((ClipData) result) && shouldUseMiuiIslandMode()) {
+                    logDebug("blocked matched clipboard from AICR in super-island mode");
                     return ClipData.newPlainText("", "");
                 }
                 return result;
             });
-            aicrClipboardHookInstalled = true;
-            logDebug("AICR ClipboardManager.getPrimaryClip hook installed");
+
+            Class<?> bubbleManagerClass = Class.forName(AICR_BUBBLE_MANAGER, false, aicrContext.getClassLoader());
+            int bubbleHookCount = 0;
+            for (Method method : bubbleManagerClass.getDeclaredMethods()) {
+                Class<?>[] parameterTypes = method.getParameterTypes();
+                if ("g".equals(method.getName()) && parameterTypes.length == 2
+                    && List.class.isAssignableFrom(parameterTypes[0])) {
+                    method.setAccessible(true);
+                    hook(method).setId("hypercopy_aicr_bubble_show").intercept(chain -> {
+                        replaceAicrCopyCue(chain.getArg(0));
+                        return chain.proceed();
+                    });
+                    bubbleHookCount++;
+                } else if ("b".equals(method.getName()) && parameterTypes.length == 1
+                    && parameterTypes[0] == String.class) {
+                    method.setAccessible(true);
+                    hook(method).setId("hypercopy_aicr_bubble_click").intercept(chain -> {
+                        Object cueId = chain.getArg(0);
+                        if (cueId instanceof String && launchAicrTarget((String) cueId)) return null;
+                        return chain.proceed();
+                    });
+                    bubbleHookCount++;
+                }
+            }
+            int positionHookCount = installAicrPositionHooks(aicrContext.getClassLoader());
+            aicrHooksInstalled = bubbleHookCount == 2;
+            logDebug("AICR clipboard and bubble hooks installed: " + bubbleHookCount
+                + ", position hooks: " + positionHookCount);
         } catch (Throwable throwable) {
-            logError("Failed to hook AICR ClipboardManager.getPrimaryClip", throwable);
+            logError("Failed to hook AICR clipboard actions", throwable);
         }
+    }
+
+    private int installAicrPositionHooks(ClassLoader classLoader) throws Exception {
+        int hookCount = 0;
+        Class<?> clickRecorderClass = Class.forName(AICR_CLICK_RECORDER, false, classLoader);
+        for (Method method : clickRecorderClass.getDeclaredMethods()) {
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            if (!"J".equals(method.getName()) || parameterTypes.length != 2
+                || parameterTypes[0] != String.class
+                || !MotionEvent.class.isAssignableFrom(parameterTypes[1])) continue;
+            method.setAccessible(true);
+            hook(method).setId("hypercopy_aicr_click_position").intercept(chain -> {
+                Object motion = chain.getArg(0);
+                Object event = chain.getArg(1);
+                if ("click".equals(motion) && event instanceof MotionEvent) {
+                    lastAicrClickY = ((MotionEvent) event).getY();
+                    lastAicrClickAt = System.currentTimeMillis();
+                    logDebug("recorded AICR click y=" + lastAicrClickY);
+                }
+                return chain.proceed();
+            });
+            hookCount++;
+        }
+
+        Class<?> containerClass = Class.forName(AICR_BUBBLE_CONTAINER, false, classLoader);
+        Method onLayout = containerClass.getDeclaredMethod(
+            "onLayout",
+            boolean.class,
+            int.class,
+            int.class,
+            int.class,
+            int.class
+        );
+        onLayout.setAccessible(true);
+        hook(onLayout).setId("hypercopy_aicr_bubble_position").intercept(chain -> {
+            positionAicrBubble(chain.getThisObject());
+            return chain.proceed();
+        });
+        return hookCount + 1;
     }
 
     private boolean handleClipboardThroughApp(ClipData clipData) {
         Context context = aicrContext;
-        if (context == null || clipData.getItemCount() == 0) return false;
-        CharSequence text = clipData.getItemAt(0).getText();
-        if (text == null) return false;
-        String value = text.toString().trim();
+        if (context == null) return false;
+        String value = firstClipText(clipData);
         if (value.isEmpty() || value.length() > Config.CLIPBOARD_TEXT_MAX_LENGTH) return false;
         try {
-            android.os.Bundle result = context.getContentResolver().call(
+            Bundle result = context.getContentResolver().call(
                 Uri.parse("content://" + Config.CLIPBOARD_MATCH_PROVIDER_AUTHORITY),
                 Config.CLIPBOARD_MATCH_PROVIDER_METHOD,
                 value,
@@ -137,17 +221,241 @@ public class HookEntry extends XposedModule {
         }
     }
 
+    private void replaceAicrCopyCue(Object value) {
+        if (!(value instanceof List)) return;
+        try {
+            for (Object cue : (List<?>) value) {
+                if (cue == null || !"copy_jump".equals(invokeString(cue, "getCategory"))) continue;
+                String cueId = invokeString(cue, "getCueId");
+                if (cueId.isEmpty()) continue;
+                aicrCopyCueIds.add(cueId);
+                float clickY = recentAicrClickY();
+                if (clickY >= 0f) aicrCuePositions.put(cueId, clickY);
+                new Handler(Looper.getMainLooper()).postDelayed(
+                    () -> {
+                        aicrCopyCueIds.remove(cueId);
+                        aicrCuePositions.remove(cueId);
+                    },
+                    AICR_TARGET_WINDOW_MILLIS
+                );
+                PendingAicrTarget target = takeAicrTarget();
+                if (target == null) return;
+
+                Object display = cue.getClass().getMethod("getDisplay").invoke(cue);
+                if (display == null) continue;
+                setPublicField(display, "targetPackage", target.targetPackage);
+                Object briefCard = getPublicField(display, "briefCard");
+                Object title = briefCard == null ? null : getPublicField(briefCard, "title");
+                if (title != null) {
+                    CharSequence appName = aicrContext.getPackageManager().getApplicationLabel(
+                        aicrContext.getPackageManager().getApplicationInfo(target.targetPackage, 0)
+                    );
+                    setPublicField(title, "text", "打开" + appName);
+                }
+                Object description = briefCard == null ? null : getPublicField(briefCard, "description");
+                if (description != null) setPublicField(description, "text", "");
+                Object startIcon = briefCard == null ? null : getPublicField(briefCard, "startIcon");
+                if (startIcon != null) {
+                    setPublicField(startIcon, "type", "application");
+                    setPublicField(startIcon, "value", target.targetPackage);
+                }
+
+                aicrCueTargets.put(cueId, target);
+                new Handler(Looper.getMainLooper()).postDelayed(
+                    () -> aicrCueTargets.remove(cueId, target),
+                    AICR_TARGET_WINDOW_MILLIS
+                );
+                logDebug("replaced AICR copy-direct cue: " + cueId + " -> " + target.targetPackage);
+                return;
+            }
+        } catch (Throwable throwable) {
+            logWarn("replace AICR copy-direct cue failed", throwable);
+        }
+    }
+
+    private PendingAicrTarget takeAicrTarget() {
+        if (aicrContext == null || lastAicrClipboardText.isEmpty()) return null;
+        try {
+            Bundle result = aicrContext.getContentResolver().call(
+                Uri.parse("content://" + Config.CLIPBOARD_MATCH_PROVIDER_AUTHORITY),
+                Config.CLIPBOARD_MATCH_PROVIDER_TARGET_METHOD,
+                lastAicrClipboardText,
+                null
+            );
+            if (result == null) return null;
+            String targetText = result.getString(Config.EXTRA_AICR_TARGET_TEXT, "").trim();
+            String targetPackage = result.getString(Config.EXTRA_AICR_TARGET_PACKAGE, "").trim();
+            if (targetText.isEmpty() || targetPackage.isEmpty()) return null;
+            return new PendingAicrTarget(
+                targetText,
+                targetPackage,
+                System.currentTimeMillis() + AICR_TARGET_WINDOW_MILLIS
+            );
+        } catch (Throwable throwable) {
+            logWarn("take AICR copy-direct target failed", throwable);
+            return null;
+        }
+    }
+
+    private boolean launchAicrTarget(String cueId) {
+        PendingAicrTarget target = aicrCueTargets.remove(cueId);
+        if (target == null || target.isExpired() || aicrContext == null) return false;
+        long identity = Binder.clearCallingIdentity();
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(target.targetText))
+                .setPackage(target.targetPackage)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            aicrContext.startActivity(intent);
+            logDebug("opened AICR copy-direct target: " + target.targetPackage);
+            return true;
+        } catch (Throwable throwable) {
+            logWarn("open AICR copy-direct target failed", throwable);
+            return false;
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private float recentAicrClickY() {
+        long age = System.currentTimeMillis() - lastAicrClickAt;
+        return age >= 0L && age <= AICR_CLICK_WINDOW_MILLIS ? lastAicrClickY : -1f;
+    }
+
+    private void positionAicrBubble(Object value) {
+        if (!(value instanceof ViewGroup)) return;
+        ViewGroup container = (ViewGroup) value;
+        for (String cueId : aicrCopyCueIds) {
+            try {
+                Object holder = container.getClass().getMethod("b", String.class)
+                    .invoke(container, cueId);
+                Object bubble = holder == null ? null : getPublicField(holder, "a");
+                if (!(bubble instanceof View)) continue;
+                View bubbleView = (View) bubble;
+                applyAicrSystemTypeface(bubbleView);
+
+                Float clickY = aicrCuePositions.get(cueId);
+                if (clickY == null) continue;
+                int bubbleHeight = bubbleView.getMeasuredHeight();
+                int containerHeight = container.getMeasuredHeight();
+                if (bubbleHeight <= 0 || containerHeight <= 0) continue;
+
+                int topInset = 0;
+                int bottomInset = 0;
+                WindowInsets windowInsets = container.getRootWindowInsets();
+                if (windowInsets != null) {
+                    Insets insets = windowInsets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+                    );
+                    topInset = insets.top;
+                    bottomInset = insets.bottom;
+                }
+                int bottomMargin = Math.round(
+                    containerHeight - bottomInset - clickY - bubbleHeight / 2f
+                );
+                int maxBottomMargin = Math.max(
+                    0,
+                    containerHeight - topInset - bottomInset - bubbleHeight
+                );
+                bottomMargin = Math.max(0, Math.min(bottomMargin, maxBottomMargin));
+                Object currentMargin = getPublicField(container, "c");
+                if (!(currentMargin instanceof Integer) || (Integer) currentMargin != bottomMargin) {
+                    setPublicField(container, "c", bottomMargin);
+                    logDebug("positioned AICR copy-direct cue at y=" + clickY
+                        + ", bottomMargin=" + bottomMargin);
+                }
+            } catch (Throwable throwable) {
+                logWarn("update AICR copy-direct cue failed", throwable);
+            }
+        }
+    }
+
+    private void applyAicrSystemTypeface(View bubble) {
+        try {
+            Object title = getPublicField(bubble, "c");
+            if (title instanceof TextView) {
+                if (systemThemeTypeface == null) {
+                    try {
+                        systemThemeTypeface = Typeface.createFromFile(SYSTEM_THEME_FONT_PATH);
+                    } catch (Throwable ignored) {
+                        systemThemeTypeface = Typeface.DEFAULT;
+                    }
+                }
+                ((TextView) title).setTypeface(systemThemeTypeface);
+            }
+        } catch (Throwable throwable) {
+            logWarn("apply system typeface failed", throwable);
+        }
+    }
+
+    private static String invokeString(Object target, String methodName) throws Exception {
+        Object value = target.getClass().getMethod(methodName).invoke(target);
+        return value == null ? "" : value.toString();
+    }
+
+    private static Object getPublicField(Object target, String fieldName) throws Exception {
+        return target.getClass().getField(fieldName).get(target);
+    }
+
+    private static void setPublicField(Object target, String fieldName, Object value) throws Exception {
+        target.getClass().getField(fieldName).set(target, value);
+    }
+
+    private static String getDeclaredString(Object target, String fieldName) {
+        try {
+            Field field = target.getClass().getDeclaredField(fieldName);
+            field.setAccessible(true);
+            Object value = field.get(target);
+            return value == null ? "" : value.toString();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static String firstClipText(ClipData clipData) {
+        if (clipData == null || clipData.getItemCount() == 0) return "";
+        CharSequence text = clipData.getItemAt(0).getText();
+        return text == null ? "" : text.toString().trim();
+    }
+
+    private boolean shouldUseSystemCopyMode() {
+        return Config.JUMP_NOTIFICATION_MODE_SYSTEM_COPY.equals(readJumpNotificationMode());
+    }
+
+    private boolean shouldUseMiuiIslandMode() {
+        return Config.JUMP_NOTIFICATION_MODE_MIUI_ISLAND.equals(readJumpNotificationMode());
+    }
+
     private boolean shouldUseCustomJumpMode() {
+        String mode = readJumpNotificationMode();
+        return Config.JUMP_NOTIFICATION_MODE_MIUI_ISLAND.equals(mode)
+            || Config.JUMP_NOTIFICATION_MODE_SYSTEM_COPY.equals(mode);
+    }
+
+    private String readJumpNotificationMode() {
         try {
             android.content.SharedPreferences preferences = getRemotePreferences(Config.PREFS_NAME);
-            String mode = preferences.getString(
+            return preferences.getString(
                 Config.KEY_LSPOSED_JUMP_NOTIFICATION_MODE,
                 preferences.getString(Config.KEY_JUMP_NOTIFICATION_MODE, Config.DEFAULT_JUMP_NOTIFICATION_MODE)
             );
-            return Config.JUMP_NOTIFICATION_MODE_MIUI_ISLAND.equals(mode)
-                || Config.JUMP_NOTIFICATION_MODE_SYSTEM_COPY.equals(mode);
         } catch (Throwable ignored) {
-            return false;
+            return Config.DEFAULT_JUMP_NOTIFICATION_MODE;
+        }
+    }
+
+    private static final class PendingAicrTarget {
+        private final String targetText;
+        private final String targetPackage;
+        private final long expiresAt;
+
+        private PendingAicrTarget(String targetText, String targetPackage, long expiresAt) {
+            this.targetText = targetText;
+            this.targetPackage = targetPackage;
+            this.expiresAt = expiresAt;
+        }
+
+        private boolean isExpired() {
+            return System.currentTimeMillis() > expiresAt;
         }
     }
 
@@ -197,26 +505,25 @@ public class HookEntry extends XposedModule {
             logDebug("hook ClipboardService method: " + method.toGenericString());
             hook(method).setId("hypercopy_clipboard_" + method.toGenericString()).intercept(chain -> {
                 int callingUid = Binder.getCallingUid();
-            Object[] args = chain.getArgs().toArray();
-            ClipData originalClipData = findClipData(args);
-            boolean systemCopy = originalClipData != null && isSystemCopyClip(originalClipData);
-            boolean suppressNativeBar = shouldSuppressNativeBar(originalClipData);
-            Object[] callArgs = suppressNativeBar ? suppressNativeBar(args) : args;
-            if (suppressNativeBar && originalClipData != null) {
-                logDebug("suppressed native ContentExtension bar, label="
-                    + String.valueOf(originalClipData.getDescription().getLabel()));
-            }
-            Object result = chain.proceed(callArgs);
-            try {
-                ClipData clipData = findClipData(callArgs);
+                Object[] args = chain.getArgs().toArray();
+                ClipData originalClipData = findClipData(args);
+                boolean systemCopyMode = shouldUseSystemCopyMode();
+                boolean suppressNativeBar = shouldSuppressNativeBar(originalClipData);
+                Object[] callArgs = suppressNativeBar ? suppressNativeBar(args) : args;
                 Context context = findContext(chain.getThisObject());
                 if (context == null) context = findSystemContext();
-                if (systemCopy && shouldStartSystemCopy(originalClipData)) {
-                    startMiuiContentExtension(context, originalClipData);
+                if (systemCopyMode) {
+                    sendTextIfNeeded(context, originalClipData, args, callingUid);
                 }
-                if (!systemCopy) {
-                    sendTextIfNeeded(context, clipData, callArgs, callingUid);
+                if (suppressNativeBar && originalClipData != null) {
+                    logDebug("suppressed native clipboard action, label="
+                        + String.valueOf(originalClipData.getDescription().getLabel()));
                 }
+                Object result = chain.proceed(callArgs);
+                try {
+                    if (!systemCopyMode) {
+                        sendTextIfNeeded(context, findClipData(callArgs), callArgs, callingUid);
+                    }
                 } catch (Throwable throwable) {
                     logWarn("clipboard hook callback failed", throwable);
                 }
@@ -266,11 +573,6 @@ public class HookEntry extends XposedModule {
         return args;
     }
 
-    private static boolean isSystemCopyClip(ClipData clipData) {
-        CharSequence label = clipData.getDescription().getLabel();
-        return label != null && "HyperCopySystemCopy".contentEquals(label);
-    }
-
     private boolean shouldSuppressNativeBar(ClipData clipData) {
         if (clipData == null || clipData.getItemCount() == 0) return false;
         CharSequence text = clipData.getItemAt(0).getText();
@@ -291,38 +593,6 @@ public class HookEntry extends XposedModule {
         } catch (Throwable ignored) {
             return false;
         }
-    }
-
-    private static void startMiuiContentExtension(Context context, ClipData clipData) {
-        if (context == null || clipData == null || clipData.getItemCount() == 0) return;
-        CharSequence text = clipData.getItemAt(0).getText();
-        if (text == null || text.toString().trim().isEmpty()) return;
-        Intent serviceIntent = new Intent(CONTENT_EXTENSION_ACTION)
-            .setPackage(CONTENT_EXTENSION_PACKAGE)
-            .putExtra(CONTENT_EXTENSION_EXTRA, text.toString().trim());
-        long identity = Binder.clearCallingIdentity();
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent);
-            } else {
-                context.startService(serviceIntent);
-            }
-            Log.d(TAG, "started MIUI ContentExtension for system copy, text=" + text.toString().trim());
-        } catch (Throwable throwable) {
-            Log.w(TAG, "start MIUI ContentExtension failed", throwable);
-        } finally {
-            Binder.restoreCallingIdentity(identity);
-        }
-    }
-
-    private static synchronized boolean shouldStartSystemCopy(ClipData clipData) {
-        if (clipData == null || clipData.getItemCount() == 0 || clipData.getItemAt(0).getText() == null) return false;
-        String text = clipData.getItemAt(0).getText().toString().trim();
-        long now = System.currentTimeMillis();
-        if (text.equals(lastSystemCopyText) && now - lastSystemCopyAt < 1_500L) return false;
-        lastSystemCopyText = text;
-        lastSystemCopyAt = now;
-        return true;
     }
 
     private static Context findContext(Object service) {
@@ -427,21 +697,20 @@ public class HookEntry extends XposedModule {
         String sourcePackage = findSourcePackage(context, args, callingUid);
         int sourceUserId = callingUid / 100_000;
 
-        Intent intent = new Intent(Config.ACTION_HANDLE_CLIPBOARD_TEXT)
-            .setComponent(new ComponentName(Config.APPLICATION_ID, SERVICE_CLASS))
-            .putExtra(Config.EXTRA_CLIPBOARD_TEXT, value)
-            .putExtra(Config.EXTRA_CLIPBOARD_SOURCE, sourcePackage);
-        logDebug("send clipboard text to app, length=" + value.length() + ", source=" + sourcePackage
+        logDebug("handle clipboard text, length=" + value.length() + ", source=" + sourcePackage
             + ", uid=" + callingUid + ", user=" + sourceUserId);
         long identity = Binder.clearCallingIdentity();
         try {
-            context.startService(intent);
+            Bundle extras = new Bundle();
+            extras.putString(Config.EXTRA_CLIPBOARD_SOURCE, sourcePackage);
+            context.getContentResolver().call(
+                Uri.parse("content://" + Config.CLIPBOARD_MATCH_PROVIDER_AUTHORITY),
+                Config.CLIPBOARD_MATCH_PROVIDER_METHOD,
+                value,
+                extras
+            );
         } catch (Throwable throwable) {
-            logWarn("start clipboard handling service failed, falling back to broadcast", throwable);
-            Intent fallback = new Intent(intent)
-                .setComponent(new ComponentName(Config.APPLICATION_ID, RECEIVER_CLASS))
-                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND | Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
-            context.sendBroadcastAsUser(fallback, android.os.Process.myUserHandle());
+            logWarn("clipboard provider call failed", throwable);
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
