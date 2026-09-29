@@ -106,8 +106,8 @@ class UpdateRepository(private val context: Context) {
     }
 
     private companion object {
-        const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/1812z/HyperCopy/releases/latest"
-        const val RELEASES_API_URL = "https://api.github.com/repos/1812z/HyperCopy/releases"
-        const val RELEASE_URL = "https://github.com/1812z/HyperCopy/releases"
+        const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/582856/HyperCopy/releases/latest"
+        const val RELEASES_API_URL = "https://api.github.com/repos/582856/HyperCopy/releases"
+        const val RELEASE_URL = "https://github.com/582856/HyperCopy/releases"
     }
 }

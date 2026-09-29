@@ -27,12 +27,15 @@ import androidx.annotation.NonNull;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Constructor;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Pattern;
-import java.util.regex.PatternSyntaxException;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import io.github.hypercopy.Config;
 import io.github.libxposed.api.XposedModule;
@@ -51,18 +54,26 @@ public class HookEntry extends XposedModule {
     private static final String AICR_CLICK_RECORDER = "ig8";
     private static final String AICR_BUBBLE_CONTAINER =
         "com.xiaomi.ai.bubble.core.bubbleview.view.BubbleContainerView";
+    private static final String AICR_CUE_DATA = "com.xiaomi.ai.bubble.core.model.CueData";
+    private static final String AICR_CUE_ID_PREFIX = "hypercopy.copy_jump#";
     private static final String SYSTEM_THEME_FONT_PATH = "/data/system/theme/fonts/Miui-Regular.ttf";
     private static final long AICR_CLICK_WINDOW_MILLIS = 4_000L;
     private static final long AICR_TARGET_WINDOW_MILLIS = 10_000L;
+    private static final long AICR_INJECT_DELAY_MILLIS = 300L;
 
     private static String lastText = "";
     private static long lastSentAt = 0L;
+    private static boolean lastSentHandled = false;
     private boolean hooksInstalled = false;
     private boolean aicrAttachHookInstalled = false;
     private boolean aicrHooksInstalled = false;
     private Context aicrContext;
+    private volatile Object aicrBubbleManager;
     private Typeface systemThemeTypeface;
     private volatile String lastAicrClipboardText = "";
+    private volatile PendingAicrTarget pendingAicrTarget;
+    private volatile float pendingAicrClickY = -1f;
+    private volatile long pendingAicrClickAt = 0L;
     private volatile float lastAicrClickY = -1f;
     private volatile long lastAicrClickAt = 0L;
     private final ConcurrentHashMap<String, PendingAicrTarget> aicrCueTargets = new ConcurrentHashMap<>();
@@ -123,8 +134,11 @@ public class HookEntry extends XposedModule {
                 String clipboardText = firstClipText((ClipData) result);
                 if (!clipboardText.isEmpty()) {
                     lastAicrClipboardText = clipboardText;
+                    confirmPendingAicrClick();
                 }
-                if (handleClipboardThroughApp((ClipData) result) && shouldUseMiuiIslandMode()) {
+                boolean handled = handleClipboardThroughApp((ClipData) result);
+                if (handled && shouldUseSystemCopyMode()) prepareAicrTarget(clipboardText);
+                if (handled && shouldUseMiuiIslandMode()) {
                     logDebug("blocked matched clipboard from AICR in super-island mode");
                     return ClipData.newPlainText("", "");
                 }
@@ -132,6 +146,8 @@ public class HookEntry extends XposedModule {
             });
 
             Class<?> bubbleManagerClass = Class.forName(AICR_BUBBLE_MANAGER, false, aicrContext.getClassLoader());
+            installAicrBubbleManagerHook(bubbleManagerClass);
+            ensureAicrBubbleManager(bubbleManagerClass);
             int bubbleHookCount = 0;
             for (Method method : bubbleManagerClass.getDeclaredMethods()) {
                 Class<?>[] parameterTypes = method.getParameterTypes();
@@ -163,6 +179,38 @@ public class HookEntry extends XposedModule {
         }
     }
 
+    private void installAicrBubbleManagerHook(Class<?> bubbleManagerClass) throws Exception {
+        Constructor<?> constructor = bubbleManagerClass.getDeclaredConstructor(Context.class);
+        constructor.setAccessible(true);
+        hook(constructor).setId("hypercopy_aicr_bubble_manager").intercept(chain -> {
+            Object result = chain.proceed();
+            Object manager = chain.getThisObject();
+            if (manager != null) {
+                aicrBubbleManager = manager;
+                PendingAicrTarget target = pendingAicrTarget;
+                if (target != null) {
+                    new Handler(Looper.getMainLooper()).post(() -> injectAicrCue(target));
+                }
+            }
+            return result;
+        });
+    }
+
+    private void ensureAicrBubbleManager(Class<?> bubbleManagerClass) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (aicrBubbleManager != null) return;
+            try {
+                Constructor<?> constructor = bubbleManagerClass.getDeclaredConstructor(Context.class);
+                constructor.setAccessible(true);
+                Object manager = constructor.newInstance(aicrContext);
+                if (aicrBubbleManager == null) aicrBubbleManager = manager;
+                logDebug("AICR bubble manager initialized");
+            } catch (Throwable throwable) {
+                logWarn("initialize AICR bubble manager failed", throwable);
+            }
+        });
+    }
+
     private int installAicrPositionHooks(ClassLoader classLoader) throws Exception {
         int hookCount = 0;
         Class<?> clickRecorderClass = Class.forName(AICR_CLICK_RECORDER, false, classLoader);
@@ -176,9 +224,8 @@ public class HookEntry extends XposedModule {
                 Object motion = chain.getArg(0);
                 Object event = chain.getArg(1);
                 if ("click".equals(motion) && event instanceof MotionEvent) {
-                    lastAicrClickY = ((MotionEvent) event).getY();
-                    lastAicrClickAt = System.currentTimeMillis();
-                    logDebug("recorded AICR click y=" + lastAicrClickY);
+                    pendingAicrClickY = ((MotionEvent) event).getY();
+                    pendingAicrClickAt = System.currentTimeMillis();
                 }
                 return chain.proceed();
             });
@@ -238,7 +285,9 @@ public class HookEntry extends XposedModule {
                     },
                     AICR_TARGET_WINDOW_MILLIS
                 );
-                PendingAicrTarget target = takeAicrTarget();
+                if (aicrCueTargets.containsKey(cueId)) return;
+                PendingAicrTarget pendingTarget = takePendingAicrTarget(lastAicrClipboardText);
+                final PendingAicrTarget target = pendingTarget != null ? pendingTarget : takeAicrTarget();
                 if (target == null) return;
 
                 Object display = cue.getClass().getMethod("getDisplay").invoke(cue);
@@ -287,6 +336,7 @@ public class HookEntry extends XposedModule {
             String targetPackage = result.getString(Config.EXTRA_AICR_TARGET_PACKAGE, "").trim();
             if (targetText.isEmpty() || targetPackage.isEmpty()) return null;
             return new PendingAicrTarget(
+                lastAicrClipboardText,
                 targetText,
                 targetPackage,
                 System.currentTimeMillis() + AICR_TARGET_WINDOW_MILLIS
@@ -295,6 +345,88 @@ public class HookEntry extends XposedModule {
             logWarn("take AICR copy-direct target failed", throwable);
             return null;
         }
+    }
+
+    private void prepareAicrTarget(String clipboardText) {
+        if (clipboardText.isEmpty()) return;
+        PendingAicrTarget target = takeAicrTarget();
+        if (target == null) return;
+        PendingAicrTarget current = pendingAicrTarget;
+        if (current != null && !current.isExpired() && current.sameTarget(target)) return;
+        pendingAicrTarget = target;
+        new Handler(Looper.getMainLooper()).postDelayed(
+            () -> injectAicrCue(target),
+            AICR_INJECT_DELAY_MILLIS
+        );
+    }
+
+    private synchronized PendingAicrTarget takePendingAicrTarget(String clipboardText) {
+        PendingAicrTarget target = pendingAicrTarget;
+        if (target == null || target.isExpired() || !target.sourceText.equals(clipboardText)) return null;
+        pendingAicrTarget = null;
+        return target;
+    }
+
+    private synchronized PendingAicrTarget claimPendingAicrTarget(PendingAicrTarget expected) {
+        if (pendingAicrTarget != expected || expected.isExpired()) return null;
+        pendingAicrTarget = null;
+        return expected;
+    }
+
+    private void injectAicrCue(PendingAicrTarget expected) {
+        Object manager = aicrBubbleManager;
+        if (manager == null) return;
+        PendingAicrTarget target = claimPendingAicrTarget(expected);
+        if (target == null) return;
+        try {
+            String cueId = AICR_CUE_ID_PREFIX + System.currentTimeMillis();
+            Object cue = createAicrCue(cueId, target);
+            aicrCueTargets.put(cueId, target);
+            aicrCopyCueIds.add(cueId);
+            float clickY = recentAicrClickY();
+            if (clickY >= 0f) aicrCuePositions.put(cueId, clickY);
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                aicrCueTargets.remove(cueId, target);
+                aicrCopyCueIds.remove(cueId);
+                aicrCuePositions.remove(cueId);
+            }, AICR_TARGET_WINDOW_MILLIS);
+            Method addCues = manager.getClass().getDeclaredMethod("l", List.class);
+            addCues.setAccessible(true);
+            addCues.invoke(manager, Collections.singletonList(cue));
+            logDebug("injected AICR copy-direct cue: " + cueId + " -> " + target.targetPackage);
+        } catch (Throwable throwable) {
+            logWarn("inject AICR copy-direct cue failed", throwable);
+        }
+    }
+
+    private Object createAicrCue(String cueId, PendingAicrTarget target) throws Exception {
+        CharSequence appName = aicrContext.getPackageManager().getApplicationLabel(
+            aicrContext.getPackageManager().getApplicationInfo(target.targetPackage, 0)
+        );
+        JSONObject startIcon = new JSONObject()
+            .put("type", "application")
+            .put("value", target.targetPackage);
+        JSONObject briefCard = new JSONObject()
+            .put("startIcon", startIcon)
+            .put("title", new JSONObject().put("text", "打开" + appName).put("highlights", new JSONArray()))
+            .put("description", new JSONObject().put("text", "").put("highlights", new JSONArray()));
+        JSONObject display = new JSONObject()
+            .put("targetPackage", target.targetPackage)
+            .put("position", new JSONObject().put("x", 12).put("y", 70).put("category", "global"))
+            .put("briefCard", briefCard)
+            .put("expandable", false);
+        JSONObject cueJson = new JSONObject()
+            .put("cueId", cueId)
+            .put("eventId", cueId)
+            .put("aliveTime", 5)
+            .put("category", "copy_jump")
+            .put("type", "action")
+            .put("supportJumpService", true)
+            .put("support_aggregate", false)
+            .put("display", display)
+            .put("actions", new JSONArray());
+        Class<?> cueDataClass = Class.forName(AICR_CUE_DATA, false, aicrContext.getClassLoader());
+        return cueDataClass.getMethod("fromJson", String.class).invoke(null, cueJson.toString());
     }
 
     private boolean launchAicrTarget(String cueId) {
@@ -319,6 +451,18 @@ public class HookEntry extends XposedModule {
     private float recentAicrClickY() {
         long age = System.currentTimeMillis() - lastAicrClickAt;
         return age >= 0L && age <= AICR_CLICK_WINDOW_MILLIS ? lastAicrClickY : -1f;
+    }
+
+    private void confirmPendingAicrClick() {
+        long clickAt = pendingAicrClickAt;
+        float clickY = pendingAicrClickY;
+        pendingAicrClickAt = 0L;
+        pendingAicrClickY = -1f;
+        long age = System.currentTimeMillis() - clickAt;
+        if (age < 0L || age > AICR_CLICK_WINDOW_MILLIS) return;
+        lastAicrClickY = clickY;
+        lastAicrClickAt = clickAt;
+        logDebug("confirmed AICR clipboard click y=" + clickY);
     }
 
     private void positionAicrBubble(Object value) {
@@ -444,11 +588,13 @@ public class HookEntry extends XposedModule {
     }
 
     private static final class PendingAicrTarget {
+        private final String sourceText;
         private final String targetText;
         private final String targetPackage;
         private final long expiresAt;
 
-        private PendingAicrTarget(String targetText, String targetPackage, long expiresAt) {
+        private PendingAicrTarget(String sourceText, String targetText, String targetPackage, long expiresAt) {
+            this.sourceText = sourceText;
             this.targetText = targetText;
             this.targetPackage = targetPackage;
             this.expiresAt = expiresAt;
@@ -456,6 +602,12 @@ public class HookEntry extends XposedModule {
 
         private boolean isExpired() {
             return System.currentTimeMillis() > expiresAt;
+        }
+
+        private boolean sameTarget(PendingAicrTarget other) {
+            return sourceText.equals(other.sourceText)
+                && targetText.equals(other.targetText)
+                && targetPackage.equals(other.targetPackage);
         }
     }
 
@@ -508,14 +660,12 @@ public class HookEntry extends XposedModule {
                 Object[] args = chain.getArgs().toArray();
                 ClipData originalClipData = findClipData(args);
                 boolean systemCopyMode = shouldUseSystemCopyMode();
-                boolean suppressNativeBar = shouldSuppressNativeBar(originalClipData);
-                Object[] callArgs = suppressNativeBar ? suppressNativeBar(args) : args;
                 Context context = findContext(chain.getThisObject());
                 if (context == null) context = findSystemContext();
-                if (systemCopyMode) {
-                    sendTextIfNeeded(context, originalClipData, args, callingUid);
-                }
-                if (suppressNativeBar && originalClipData != null) {
+                boolean handledByHyperCopy = systemCopyMode
+                    && sendTextIfNeeded(context, originalClipData, args, callingUid);
+                Object[] callArgs = handledByHyperCopy ? suppressNativeBar(args) : args;
+                if (handledByHyperCopy && originalClipData != null) {
                     logDebug("suppressed native clipboard action, label="
                         + String.valueOf(originalClipData.getDescription().getLabel()));
                 }
@@ -571,28 +721,6 @@ public class HookEntry extends XposedModule {
             break;
         }
         return args;
-    }
-
-    private boolean shouldSuppressNativeBar(ClipData clipData) {
-        if (clipData == null || clipData.getItemCount() == 0) return false;
-        CharSequence text = clipData.getItemAt(0).getText();
-        if (text == null || text.toString().trim().isEmpty()) return false;
-        if (!shouldUseCustomJumpMode()) return false;
-        try {
-            android.content.SharedPreferences preferences = getRemotePreferences(Config.PREFS_NAME);
-            Set<String> patterns = preferences.getStringSet(Config.KEY_LSPOSED_MATCH_PATTERNS, null);
-            if (patterns == null || patterns.isEmpty()) return false;
-            String value = text.toString().trim();
-            for (String pattern : patterns) {
-                try {
-                    if (Pattern.compile(pattern).matcher(value).find()) return true;
-                } catch (PatternSyntaxException ignored) {
-                }
-            }
-            return false;
-        } catch (Throwable ignored) {
-            return false;
-        }
     }
 
     private static Context findContext(Object service) {
@@ -682,18 +810,19 @@ public class HookEntry extends XposedModule {
         }
     }
 
-    private void sendTextIfNeeded(Context context, ClipData clipData, Object[] args, int callingUid) {
-        if (context == null || clipData == null || clipData.getItemCount() == 0) return;
+    private synchronized boolean sendTextIfNeeded(Context context, ClipData clipData, Object[] args, int callingUid) {
+        if (context == null || clipData == null || clipData.getItemCount() == 0) return false;
         CharSequence text = extractPlainText(context, clipData);
-        if (text == null) return;
+        if (text == null) return false;
 
         String value = text.toString().trim();
-        if (value.isEmpty() || value.length() > Config.CLIPBOARD_TEXT_MAX_LENGTH) return;
+        if (value.isEmpty() || value.length() > Config.CLIPBOARD_TEXT_MAX_LENGTH) return false;
 
         long now = System.currentTimeMillis();
-        if (value.equals(lastText) && now - lastSentAt < DUPLICATE_WINDOW_MILLIS) return;
+        if (value.equals(lastText) && now - lastSentAt < DUPLICATE_WINDOW_MILLIS) return lastSentHandled;
         lastText = value;
         lastSentAt = now;
+        lastSentHandled = false;
         String sourcePackage = findSourcePackage(context, args, callingUid);
         int sourceUserId = callingUid / 100_000;
 
@@ -703,14 +832,17 @@ public class HookEntry extends XposedModule {
         try {
             Bundle extras = new Bundle();
             extras.putString(Config.EXTRA_CLIPBOARD_SOURCE, sourcePackage);
-            context.getContentResolver().call(
+            Bundle result = context.getContentResolver().call(
                 Uri.parse("content://" + Config.CLIPBOARD_MATCH_PROVIDER_AUTHORITY),
                 Config.CLIPBOARD_MATCH_PROVIDER_METHOD,
                 value,
                 extras
             );
+            lastSentHandled = result != null && result.getBoolean(Config.CLIPBOARD_MATCH_PROVIDER_RESULT, false);
+            return lastSentHandled;
         } catch (Throwable throwable) {
             logWarn("clipboard provider call failed", throwable);
+            return false;
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
