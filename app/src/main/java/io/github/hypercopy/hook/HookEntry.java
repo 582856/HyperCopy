@@ -28,6 +28,7 @@ import androidx.annotation.NonNull;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Constructor;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -60,6 +61,9 @@ public class HookEntry extends XposedModule {
     private static final long AICR_CLICK_WINDOW_MILLIS = 4_000L;
     private static final long AICR_TARGET_WINDOW_MILLIS = 10_000L;
     private static final long AICR_INJECT_DELAY_MILLIS = 300L;
+    private static final int AICR_TARGET_RETRY_LIMIT = 20;
+    private static final long AICR_TARGET_RETRY_DELAY_MILLIS = 100L;
+    private static final long AICR_NATIVE_SUPPRESSION_MILLIS = 5_000L;
 
     private static String lastText = "";
     private static long lastSentAt = 0L;
@@ -71,6 +75,8 @@ public class HookEntry extends XposedModule {
     private volatile Object aicrBubbleManager;
     private Typeface systemThemeTypeface;
     private volatile String lastAicrClipboardText = "";
+    private volatile String suppressedAicrClipboardText = "";
+    private volatile long suppressAicrNativeUntil = 0L;
     private volatile PendingAicrTarget pendingAicrTarget;
     private volatile float pendingAicrClickY = -1f;
     private volatile long pendingAicrClickAt = 0L;
@@ -137,7 +143,11 @@ public class HookEntry extends XposedModule {
                     confirmPendingAicrClick();
                 }
                 boolean handled = handleClipboardThroughApp((ClipData) result);
-                if (handled && shouldUseSystemCopyMode()) prepareAicrTarget(clipboardText);
+                if (handled && shouldUseSystemCopyMode()) {
+                    suppressedAicrClipboardText = clipboardText;
+                    suppressAicrNativeUntil = System.currentTimeMillis() + AICR_NATIVE_SUPPRESSION_MILLIS;
+                    prepareAicrTarget(clipboardText);
+                }
                 if (handled && shouldUseMiuiIslandMode()) {
                     logDebug("blocked matched clipboard from AICR in super-island mode");
                     return ClipData.newPlainText("", "");
@@ -155,8 +165,10 @@ public class HookEntry extends XposedModule {
                     && List.class.isAssignableFrom(parameterTypes[0])) {
                     method.setAccessible(true);
                     hook(method).setId("hypercopy_aicr_bubble_show").intercept(chain -> {
-                        replaceAicrCopyCue(chain.getArg(0));
-                        return chain.proceed();
+                        Object[] args = chain.getArgs().toArray();
+                        args[0] = suppressNativeAicrCopyCues(args[0]);
+                        trackAicrCopyCuePositions(args[0]);
+                        return chain.proceed(args);
                     });
                     bubbleHookCount++;
                 } else if ("b".equals(method.getName()) && parameterTypes.length == 1
@@ -268,67 +280,60 @@ public class HookEntry extends XposedModule {
         }
     }
 
-    private void replaceAicrCopyCue(Object value) {
+    private Object suppressNativeAicrCopyCues(Object value) {
+        if (!(value instanceof List)
+            || System.currentTimeMillis() > suppressAicrNativeUntil
+            || !lastAicrClipboardText.equals(suppressedAicrClipboardText)) return value;
+        List<?> cues = (List<?>) value;
+        ArrayList<Object> filtered = new ArrayList<>(cues.size());
+        int removed = 0;
+        for (Object cue : cues) {
+            try {
+                String category = cue == null ? "" : invokeString(cue, "getCategory");
+                String cueId = cue == null ? "" : invokeString(cue, "getCueId");
+                if ("copy_jump".equals(category) && !cueId.startsWith(AICR_CUE_ID_PREFIX)) {
+                    removed++;
+                    continue;
+                }
+            } catch (Throwable throwable) {
+                logWarn("inspect AICR cue for suppression failed", throwable);
+            }
+            filtered.add(cue);
+        }
+        if (removed > 0) logDebug("suppressed native AICR copy-direct cues: " + removed);
+        return removed > 0 ? filtered : value;
+    }
+
+    private void trackAicrCopyCuePositions(Object value) {
         if (!(value instanceof List)) return;
-        try {
-            for (Object cue : (List<?>) value) {
+        float clickY = recentAicrClickY();
+        if (clickY < 0f) return;
+        for (Object cue : (List<?>) value) {
+            try {
                 if (cue == null || !"copy_jump".equals(invokeString(cue, "getCategory"))) continue;
                 String cueId = invokeString(cue, "getCueId");
                 if (cueId.isEmpty()) continue;
-                aicrCopyCueIds.add(cueId);
-                float clickY = recentAicrClickY();
-                if (clickY >= 0f) aicrCuePositions.put(cueId, clickY);
-                new Handler(Looper.getMainLooper()).postDelayed(
-                    () -> {
+                boolean added = aicrCopyCueIds.add(cueId);
+                aicrCuePositions.put(cueId, clickY);
+                if (added) {
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
                         aicrCopyCueIds.remove(cueId);
                         aicrCuePositions.remove(cueId);
-                    },
-                    AICR_TARGET_WINDOW_MILLIS
-                );
-                if (aicrCueTargets.containsKey(cueId)) return;
-                PendingAicrTarget pendingTarget = takePendingAicrTarget(lastAicrClipboardText);
-                final PendingAicrTarget target = pendingTarget != null ? pendingTarget : takeAicrTarget();
-                if (target == null) return;
-
-                Object display = cue.getClass().getMethod("getDisplay").invoke(cue);
-                if (display == null) continue;
-                setPublicField(display, "targetPackage", target.targetPackage);
-                Object briefCard = getPublicField(display, "briefCard");
-                Object title = briefCard == null ? null : getPublicField(briefCard, "title");
-                if (title != null) {
-                    CharSequence appName = aicrContext.getPackageManager().getApplicationLabel(
-                        aicrContext.getPackageManager().getApplicationInfo(target.targetPackage, 0)
-                    );
-                    setPublicField(title, "text", "打开" + appName);
+                    }, AICR_TARGET_WINDOW_MILLIS);
                 }
-                Object description = briefCard == null ? null : getPublicField(briefCard, "description");
-                if (description != null) setPublicField(description, "text", "");
-                Object startIcon = briefCard == null ? null : getPublicField(briefCard, "startIcon");
-                if (startIcon != null) {
-                    setPublicField(startIcon, "type", "application");
-                    setPublicField(startIcon, "value", target.targetPackage);
-                }
-
-                aicrCueTargets.put(cueId, target);
-                new Handler(Looper.getMainLooper()).postDelayed(
-                    () -> aicrCueTargets.remove(cueId, target),
-                    AICR_TARGET_WINDOW_MILLIS
-                );
-                logDebug("replaced AICR copy-direct cue: " + cueId + " -> " + target.targetPackage);
-                return;
+            } catch (Throwable throwable) {
+                logWarn("track AICR copy-direct cue position failed", throwable);
             }
-        } catch (Throwable throwable) {
-            logWarn("replace AICR copy-direct cue failed", throwable);
         }
     }
 
-    private PendingAicrTarget takeAicrTarget() {
-        if (aicrContext == null || lastAicrClipboardText.isEmpty()) return null;
+    private PendingAicrTarget takeAicrTarget(String clipboardText) {
+        if (aicrContext == null || clipboardText.isEmpty()) return null;
         try {
             Bundle result = aicrContext.getContentResolver().call(
                 Uri.parse("content://" + Config.CLIPBOARD_MATCH_PROVIDER_AUTHORITY),
                 Config.CLIPBOARD_MATCH_PROVIDER_TARGET_METHOD,
-                lastAicrClipboardText,
+                clipboardText,
                 null
             );
             if (result == null) return null;
@@ -336,7 +341,7 @@ public class HookEntry extends XposedModule {
             String targetPackage = result.getString(Config.EXTRA_AICR_TARGET_PACKAGE, "").trim();
             if (targetText.isEmpty() || targetPackage.isEmpty()) return null;
             return new PendingAicrTarget(
-                lastAicrClipboardText,
+                clipboardText,
                 targetText,
                 targetPackage,
                 System.currentTimeMillis() + AICR_TARGET_WINDOW_MILLIS
@@ -348,9 +353,21 @@ public class HookEntry extends XposedModule {
     }
 
     private void prepareAicrTarget(String clipboardText) {
-        if (clipboardText.isEmpty()) return;
-        PendingAicrTarget target = takeAicrTarget();
-        if (target == null) return;
+        prepareAicrTarget(clipboardText, 0);
+    }
+
+    private void prepareAicrTarget(String clipboardText, int attempt) {
+        if (clipboardText.isEmpty() || !clipboardText.equals(lastAicrClipboardText)) return;
+        PendingAicrTarget target = takeAicrTarget(clipboardText);
+        if (target == null) {
+            if (attempt < AICR_TARGET_RETRY_LIMIT) {
+                new Handler(Looper.getMainLooper()).postDelayed(
+                    () -> prepareAicrTarget(clipboardText, attempt + 1),
+                    AICR_TARGET_RETRY_DELAY_MILLIS
+                );
+            }
+            return;
+        }
         PendingAicrTarget current = pendingAicrTarget;
         if (current != null && !current.isExpired() && current.sameTarget(target)) return;
         pendingAicrTarget = target;
@@ -358,13 +375,6 @@ public class HookEntry extends XposedModule {
             () -> injectAicrCue(target),
             AICR_INJECT_DELAY_MILLIS
         );
-    }
-
-    private synchronized PendingAicrTarget takePendingAicrTarget(String clipboardText) {
-        PendingAicrTarget target = pendingAicrTarget;
-        if (target == null || target.isExpired() || !target.sourceText.equals(clipboardText)) return null;
-        pendingAicrTarget = null;
-        return target;
     }
 
     private synchronized PendingAicrTarget claimPendingAicrTarget(PendingAicrTarget expected) {
