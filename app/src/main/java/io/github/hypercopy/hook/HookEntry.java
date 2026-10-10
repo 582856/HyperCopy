@@ -337,12 +337,12 @@ public class HookEntry extends XposedModule {
                 null
             );
             if (result == null) return null;
-            String targetText = result.getString(Config.EXTRA_AICR_TARGET_TEXT, "").trim();
+            Intent targetIntent = result.getParcelable(Config.EXTRA_AICR_TARGET_INTENT, Intent.class);
             String targetPackage = result.getString(Config.EXTRA_AICR_TARGET_PACKAGE, "").trim();
-            if (targetText.isEmpty() || targetPackage.isEmpty()) return null;
+            if (targetIntent == null || targetPackage.isEmpty()) return null;
             return new PendingAicrTarget(
                 clipboardText,
-                targetText,
+                targetIntent,
                 targetPackage,
                 System.currentTimeMillis() + AICR_TARGET_WINDOW_MILLIS
             );
@@ -444,7 +444,7 @@ public class HookEntry extends XposedModule {
         if (target == null || target.isExpired() || aicrContext == null) return false;
         long identity = Binder.clearCallingIdentity();
         try {
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(target.targetText))
+            Intent intent = new Intent(target.targetIntent)
                 .setPackage(target.targetPackage)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             aicrContext.startActivity(intent);
@@ -599,13 +599,13 @@ public class HookEntry extends XposedModule {
 
     private static final class PendingAicrTarget {
         private final String sourceText;
-        private final String targetText;
+        private final Intent targetIntent;
         private final String targetPackage;
         private final long expiresAt;
 
-        private PendingAicrTarget(String sourceText, String targetText, String targetPackage, long expiresAt) {
+        private PendingAicrTarget(String sourceText, Intent targetIntent, String targetPackage, long expiresAt) {
             this.sourceText = sourceText;
-            this.targetText = targetText;
+            this.targetIntent = targetIntent;
             this.targetPackage = targetPackage;
             this.expiresAt = expiresAt;
         }
@@ -616,7 +616,7 @@ public class HookEntry extends XposedModule {
 
         private boolean sameTarget(PendingAicrTarget other) {
             return sourceText.equals(other.sourceText)
-                && targetText.equals(other.targetText)
+                && targetIntent.filterEquals(other.targetIntent)
                 && targetPackage.equals(other.targetPackage);
         }
     }

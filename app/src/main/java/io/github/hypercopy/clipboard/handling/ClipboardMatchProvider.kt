@@ -24,7 +24,7 @@ class ClipboardMatchProvider : ContentProvider() {
         if (method == Config.CLIPBOARD_MATCH_PROVIDER_TARGET_METHOD) {
             val target = MiuiSystemCopy.takeTarget(arg.orEmpty()) ?: return Bundle()
             return Bundle().apply {
-                putString(Config.EXTRA_AICR_TARGET_TEXT, target.text)
+                putParcelable(Config.EXTRA_AICR_TARGET_INTENT, target.intent)
                 putString(Config.EXTRA_AICR_TARGET_PACKAGE, target.packageName)
             }
         }

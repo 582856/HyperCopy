@@ -59,7 +59,7 @@ object PendingJumpCoordinator {
         if (notificationMode == Config.JUMP_NOTIFICATION_MODE_SYSTEM_COPY) {
             pending?.cancel(appContext)
             pending = null
-            if (MiuiSystemCopy.copy(jump, originalText)) return
+            if (MiuiSystemCopy.copy(appContext, jump, originalText)) return
             HyperLog.d(TAG, "system copy jump unavailable, falling back to notification")
         }
         if (!canPostNotification(appContext)) {
