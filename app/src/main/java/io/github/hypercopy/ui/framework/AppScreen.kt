@@ -132,6 +132,7 @@ fun AppScreen(
     var jumpNotificationMode by remember {
         mutableStateOf(jumpNotificationModeFromValue(settingsRepository.readJumpNotificationMode()))
     }
+    var copyDirectBrowserPackage by remember { mutableStateOf(settingsRepository.readCopyDirectBrowser()) }
     var updateDialog by remember { mutableStateOf<UpdateDialogState?>(null) }
     var checkingUpdate by remember { mutableStateOf(false) }
 
@@ -482,6 +483,11 @@ fun AppScreen(
                                 appLanguage = appLanguage,
                                 clipboardMonitorMode = clipboardMonitorMode,
                                 jumpNotificationMode = jumpNotificationMode,
+                                copyDirectBrowserPackage = copyDirectBrowserPackage,
+                                onCopyDirectBrowserChange = {
+                                    copyDirectBrowserPackage = it
+                                    settingsRepository.persistCopyDirectBrowser(it)
+                                },
                                 onLogLevelChange = {
                                     logLevel = it
                                     settingsRepository.persistLogLevel(it)

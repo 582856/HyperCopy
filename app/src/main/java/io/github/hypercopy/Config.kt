@@ -11,6 +11,7 @@ object Config {
     const val KEY_COLOR_MODE = "color_mode"
     const val KEY_CLIPBOARD_MONITOR_MODE = "clipboard_monitor_mode"
     const val KEY_JUMP_NOTIFICATION_MODE = "jump_notification_mode"
+    const val KEY_COPY_DIRECT_BROWSER = "copy_direct_browser"
     const val KEY_LSPOSED_JUMP_NOTIFICATION_MODE = "lsposed_jump_notification_mode"
     const val KEY_LSPOSED_MATCH_PATTERNS = "lsposed_match_patterns"
     const val KEY_MIUI_ISLAND_BYPASS_RESTRICTION = "miui_island_bypass_restriction"

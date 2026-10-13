@@ -95,6 +95,22 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
+    fun readCopyDirectBrowser(): String = preferences().getString(Config.KEY_COPY_DIRECT_BROWSER, "").orEmpty()
+
+    fun persistCopyDirectBrowser(value: String) {
+        preferences().edit(commit = true) { putString(Config.KEY_COPY_DIRECT_BROWSER, value) }
+        syncCopyDirectBrowserToLsposed(value = value)
+    }
+
+    fun syncCopyDirectBrowserToLsposed(service: XposedService? = App.xposedService, value: String = readCopyDirectBrowser()) {
+        if (service == null) return
+        runCatching {
+            service.getRemotePreferences(Config.PREFS_NAME).edit()
+                .putString(Config.KEY_COPY_DIRECT_BROWSER, value)
+                .commit()
+        }
+    }
+
     fun syncRuleMatchPatternsToLsposed(
         service: XposedService? = App.xposedService,
         patterns: Set<String> = RuleRepository(context).readRules()

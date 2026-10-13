@@ -8,6 +8,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
@@ -18,6 +24,10 @@ import io.github.hypercopy.ui.framework.AppLanguage
 import io.github.hypercopy.ui.framework.ClipboardMonitorMode
 import io.github.hypercopy.ui.framework.JumpNotificationMode
 import io.github.hypercopy.data.systemlink.AndroidUser
+import io.github.hypercopy.data.settings.CopyDirectBrowser
+import io.github.hypercopy.data.settings.loadCopyDirectBrowsers
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import io.github.hypercopy.ui.components.SettingsAction
 import io.github.hypercopy.ui.components.SettingsActionWithArrow
 import io.github.hypercopy.ui.components.SettingsIcon
@@ -51,6 +61,7 @@ fun SettingsPage(
     appLanguage: AppLanguage,
     clipboardMonitorMode: ClipboardMonitorMode,
     jumpNotificationMode: JumpNotificationMode,
+    copyDirectBrowserPackage: String,
     onLogLevelChange: (Int) -> Unit,
     onAutoCheckUpdateChange: (Boolean) -> Unit,
     onHideFromRecentsChange: (Boolean) -> Unit,
@@ -60,6 +71,7 @@ fun SettingsPage(
     onMiuiIslandBypassRestrictionChange: (Boolean) -> Unit,
     onAppLanguageChange: (AppLanguage) -> Unit,
     onJumpNotificationModeChange: (JumpNotificationMode) -> Unit,
+    onCopyDirectBrowserChange: (String) -> Unit,
     onCheckUpdate: () -> Unit,
     onOpenTheme: () -> Unit,
     onOpenAppList: () -> Unit,
@@ -70,6 +82,15 @@ fun SettingsPage(
     val languageOptions = languageOptions()
     val jumpNotificationModeOptions = jumpNotificationModeOptions()
     val clonedAppUserOptions = clonedAppUserOptions(clonedAppUsers)
+    val context = LocalContext.current
+    var installedBrowsers by remember { mutableStateOf(emptyList<CopyDirectBrowser>()) }
+    LaunchedEffect(context) {
+        installedBrowsers = withContext(Dispatchers.IO) { loadCopyDirectBrowsers(context.packageManager) }
+    }
+    val browserOptions = listOf(CopyDirectBrowser("", stringResource(R.string.copy_direct_browser_unchanged))) +
+        installedBrowsers + if (copyDirectBrowserPackage.isNotBlank() && installedBrowsers.none { it.packageName == copyDirectBrowserPackage }) {
+            listOf(CopyDirectBrowser(copyDirectBrowserPackage, copyDirectBrowserPackage))
+        } else emptyList()
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -108,6 +129,15 @@ fun SettingsPage(
                     startAction = { SettingsIcon(imageVector = MiuixIcons.Community) },
                     insideMargin = SettingsItemMargin,
                     onSelectedIndexChange = { onJumpNotificationModeChange(jumpNotificationModeOptions[it].value) },
+                )
+                OverlayDropdownPreference(
+                    title = stringResource(R.string.copy_direct_browser),
+                    summary = stringResource(R.string.copy_direct_browser_summary),
+                    items = browserOptions.map { it.label },
+                    selectedIndex = browserOptions.indexOfFirst { it.packageName == copyDirectBrowserPackage }.coerceAtLeast(0),
+                    startAction = { SettingsIcon(imageVector = MiuixIcons.Copy) },
+                    insideMargin = SettingsItemMargin,
+                    onSelectedIndexChange = { onCopyDirectBrowserChange(browserOptions[it].packageName) },
                 )
                 if (jumpNotificationMode == JumpNotificationMode.MiuiIsland && clipboardMonitorMode == ClipboardMonitorMode.Shizuku) {
                     SwitchAction(

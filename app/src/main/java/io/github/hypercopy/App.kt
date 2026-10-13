@@ -21,6 +21,7 @@ class App : Application(), XposedServiceHelper.OnServiceListener {
         val settings = SettingsRepository(this)
         settings.syncLogLevelToLsposed(service)
         settings.syncJumpNotificationModeToLsposed()
+        settings.syncCopyDirectBrowserToLsposed(service)
         settings.syncRuleMatchPatternsToLsposed(service)
         listeners.forEach { it(service) }
     }

@@ -21,8 +21,8 @@ android {
         applicationId = "io.github.hypercopy"
         minSdk = 33
         targetSdk = 36
-        versionCode = 13
-        versionName = "v1.9.3"
+        versionCode = 14
+        versionName = "v1.9.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -79,6 +79,7 @@ kotlin {
 }
 
 dependencies {
+    implementation("org.luckypray:dexkit:2.2.0")
     compileOnly("io.github.libxposed:api:102.0.0")
 
     implementation("io.github.libxposed:service:102.0.0")

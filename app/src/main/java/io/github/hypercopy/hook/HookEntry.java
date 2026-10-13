@@ -114,11 +114,12 @@ public class HookEntry extends XposedModule {
             hook(attach).setId("hypercopy_aicr_attach").intercept(chain -> {
                 Object context = chain.getArg(0);
                 Object result = chain.proceed();
-                if (!AICR_PROCESS.equals(Application.getProcessName())) return result;
                 if (context instanceof Context) {
                     Context applicationContext = ((Context) context).getApplicationContext();
                     aicrContext = applicationContext != null ? applicationContext : (Context) context;
                 }
+                if (aicrContext != null) AicrBrowserHooks.install(this, aicrContext);
+                if (!AICR_PROCESS.equals(Application.getProcessName())) return result;
                 installAicrHooks();
                 return result;
             });
@@ -167,6 +168,7 @@ public class HookEntry extends XposedModule {
                     hook(method).setId("hypercopy_aicr_bubble_show").intercept(chain -> {
                         Object[] args = chain.getArgs().toArray();
                         args[0] = suppressNativeAicrCopyCues(args[0]);
+                        AicrBrowserHooks.updateCopyCues(this, aicrContext, args[0]);
                         trackAicrCopyCuePositions(args[0]);
                         return chain.proceed(args);
                     });
