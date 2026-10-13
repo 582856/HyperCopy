@@ -40,6 +40,42 @@ class MiuiSystemCopyTest {
         assertEquals("copy", transported.getStringExtra("from"))
     }
 
+    @Test
+    fun cachedTargetDefaultsToKeepingClipboard() {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com/default"))
+            .setPackage(context.packageName)
+        val source = "default clipboard preference"
+        assertTrue(MiuiSystemCopy.copy(context, PendingJump.IntentJump("Example", intent), source))
+        val target = requireNotNull(MiuiSystemCopy.takeTarget(source))
+        assertFalse(target.clearClipboardAfterJump)
+        assertTrue(intent.filterEquals(target.intent))
+        assertNull(MiuiSystemCopy.takeTarget(source))
+    }
+
+    @Test
+    fun cachedTargetRetainsEnabledClipboardClearPreference() {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com/clear"))
+            .setPackage(context.packageName)
+        val source = "enabled clipboard preference"
+        assertTrue(MiuiSystemCopy.copy(context, PendingJump.IntentJump("Example", intent), source, clearClipboardAfterJump = true))
+        val target = requireNotNull(MiuiSystemCopy.takeTarget(source))
+        assertTrue(target.clearClipboardAfterJump)
+        assertTrue(intent.filterEquals(target.intent))
+        assertNull(MiuiSystemCopy.takeTarget(source))
+    }
+
+    @Test
+    fun cachedTargetRetainsDisabledClipboardClearPreference() {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com/keep"))
+            .setPackage(context.packageName)
+        val source = "disabled clipboard preference"
+        assertTrue(MiuiSystemCopy.copy(context, PendingJump.IntentJump("Example", intent), source, clearClipboardAfterJump = false))
+        val target = requireNotNull(MiuiSystemCopy.takeTarget(source))
+        assertFalse(target.clearClipboardAfterJump)
+        assertTrue(intent.filterEquals(target.intent))
+        assertNull(MiuiSystemCopy.takeTarget(source))
+    }
+
     private fun roundTrip(intent: Intent): Intent {
         val parcel = Parcel.obtain()
         try {

@@ -2,6 +2,8 @@
     <string name="copy_direct_browser">Copy-direct browser</string>
     <string name="copy_direct_browser_summary">Change the browser used by copy-direct</string>
     <string name="copy_direct_browser_unchanged">Unchanged</string>
+    <string name="copy_direct_adaptive_grip">Adaptive grip</string>
+    <string name="copy_direct_adaptive_grip_summary">Position copy-direct bubbles using the system’s left/right hand grip detection</string>
     <string name="app_name">HyperCopy</string>
     <string name="xposed_description">HyperCopy Xposed module</string>
 

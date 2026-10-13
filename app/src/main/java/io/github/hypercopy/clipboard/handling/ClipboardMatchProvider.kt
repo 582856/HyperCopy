@@ -26,6 +26,7 @@ class ClipboardMatchProvider : ContentProvider() {
             return Bundle().apply {
                 putParcelable(Config.EXTRA_AICR_TARGET_INTENT, target.intent)
                 putString(Config.EXTRA_AICR_TARGET_PACKAGE, target.packageName)
+                putBoolean(Config.EXTRA_AICR_CLEAR_CLIPBOARD_AFTER_JUMP, target.clearClipboardAfterJump)
             }
         }
         val source = extras?.getString(Config.EXTRA_CLIPBOARD_SOURCE).orEmpty()

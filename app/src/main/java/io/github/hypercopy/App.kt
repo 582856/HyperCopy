@@ -22,6 +22,7 @@ class App : Application(), XposedServiceHelper.OnServiceListener {
         settings.syncLogLevelToLsposed(service)
         settings.syncJumpNotificationModeToLsposed()
         settings.syncCopyDirectBrowserToLsposed(service)
+        settings.syncCopyDirectAdaptiveGripToLsposed(service)
         settings.syncRuleMatchPatternsToLsposed(service)
         listeners.forEach { it(service) }
     }

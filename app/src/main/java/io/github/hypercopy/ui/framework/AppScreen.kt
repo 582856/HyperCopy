@@ -133,6 +133,7 @@ fun AppScreen(
         mutableStateOf(jumpNotificationModeFromValue(settingsRepository.readJumpNotificationMode()))
     }
     var copyDirectBrowserPackage by remember { mutableStateOf(settingsRepository.readCopyDirectBrowser()) }
+    var copyDirectAdaptiveGrip by remember { mutableStateOf(settingsRepository.readCopyDirectAdaptiveGrip()) }
     var updateDialog by remember { mutableStateOf<UpdateDialogState?>(null) }
     var checkingUpdate by remember { mutableStateOf(false) }
 
@@ -484,9 +485,14 @@ fun AppScreen(
                                 clipboardMonitorMode = clipboardMonitorMode,
                                 jumpNotificationMode = jumpNotificationMode,
                                 copyDirectBrowserPackage = copyDirectBrowserPackage,
+                                copyDirectAdaptiveGrip = copyDirectAdaptiveGrip,
                                 onCopyDirectBrowserChange = {
                                     copyDirectBrowserPackage = it
                                     settingsRepository.persistCopyDirectBrowser(it)
+                                },
+                                onCopyDirectAdaptiveGripChange = {
+                                    copyDirectAdaptiveGrip = it
+                                    settingsRepository.persistCopyDirectAdaptiveGrip(it)
                                 },
                                 onLogLevelChange = {
                                     logLevel = it

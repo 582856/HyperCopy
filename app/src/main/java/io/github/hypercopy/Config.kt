@@ -12,6 +12,7 @@ object Config {
     const val KEY_CLIPBOARD_MONITOR_MODE = "clipboard_monitor_mode"
     const val KEY_JUMP_NOTIFICATION_MODE = "jump_notification_mode"
     const val KEY_COPY_DIRECT_BROWSER = "copy_direct_browser"
+    const val KEY_COPY_DIRECT_ADAPTIVE_GRIP = "copy_direct_adaptive_grip"
     const val KEY_LSPOSED_JUMP_NOTIFICATION_MODE = "lsposed_jump_notification_mode"
     const val KEY_LSPOSED_MATCH_PATTERNS = "lsposed_match_patterns"
     const val KEY_MIUI_ISLAND_BYPASS_RESTRICTION = "miui_island_bypass_restriction"
@@ -34,6 +35,7 @@ object Config {
     const val EXTRA_PENDING_JUMP_USER_ID = "io.github.hypercopy.extra.PENDING_JUMP_USER_ID"
     const val EXTRA_AICR_TARGET_INTENT = "io.github.hypercopy.extra.AICR_TARGET_INTENT"
     const val EXTRA_AICR_TARGET_PACKAGE = "io.github.hypercopy.extra.AICR_TARGET_PACKAGE"
+    const val EXTRA_AICR_CLEAR_CLIPBOARD_AFTER_JUMP = "io.github.hypercopy.extra.AICR_CLEAR_CLIPBOARD_AFTER_JUMP"
     const val CLIPBOARD_MATCH_PROVIDER_AUTHORITY = "io.github.hypercopy.clipboard.match"
     const val CLIPBOARD_MATCH_PROVIDER_METHOD = "handle_matched_clipboard"
     const val CLIPBOARD_MATCH_PROVIDER_TARGET_METHOD = "take_copy_direct_target"
@@ -70,6 +72,7 @@ object Config {
     const val DEFAULT_COLOR_MODE = COLOR_MODE_SYSTEM
     const val DEFAULT_CLIPBOARD_MONITOR_MODE = CLIPBOARD_MONITOR_MODE_LSPOSED
     const val DEFAULT_JUMP_NOTIFICATION_MODE = JUMP_NOTIFICATION_MODE_NONE
+    const val DEFAULT_COPY_DIRECT_ADAPTIVE_GRIP = false
     const val DEFAULT_MIUI_ISLAND_BYPASS_RESTRICTION = false
     const val DEFAULT_APP_LIST_WORK_MODE = APP_LIST_WORK_MODE_BLACKLIST
     const val DEFAULT_IGNORE_JUMP_APP = true

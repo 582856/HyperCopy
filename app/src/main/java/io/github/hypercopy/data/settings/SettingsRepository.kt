@@ -111,6 +111,25 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
+    fun readCopyDirectAdaptiveGrip(): Boolean = preferences().getBoolean(
+        Config.KEY_COPY_DIRECT_ADAPTIVE_GRIP,
+        Config.DEFAULT_COPY_DIRECT_ADAPTIVE_GRIP,
+    )
+
+    fun persistCopyDirectAdaptiveGrip(value: Boolean) {
+        preferences().edit(commit = true) { putBoolean(Config.KEY_COPY_DIRECT_ADAPTIVE_GRIP, value) }
+        syncCopyDirectAdaptiveGripToLsposed(value = value)
+    }
+
+    fun syncCopyDirectAdaptiveGripToLsposed(service: XposedService? = App.xposedService, value: Boolean = readCopyDirectAdaptiveGrip()) {
+        if (service == null) return
+        runCatching {
+            service.getRemotePreferences(Config.PREFS_NAME).edit()
+                .putBoolean(Config.KEY_COPY_DIRECT_ADAPTIVE_GRIP, value)
+                .commit()
+        }
+    }
+
     fun syncRuleMatchPatternsToLsposed(
         service: XposedService? = App.xposedService,
         patterns: Set<String> = RuleRepository(context).readRules()

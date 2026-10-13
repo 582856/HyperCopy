@@ -2,6 +2,8 @@
     <string name="copy_direct_browser">复制直达浏览器</string>
     <string name="copy_direct_browser_summary">修改复制直达使用的浏览器</string>
     <string name="copy_direct_browser_unchanged">不修改</string>
+    <string name="copy_direct_adaptive_grip">适人握持</string>
+    <string name="copy_direct_adaptive_grip_summary">根据系统识别的左右手握持状态调整复制直达气泡的位置</string>
     <string name="app_name">HyperCopy</string>
     <string name="xposed_description">HyperCopy Xposed 模块</string>
 

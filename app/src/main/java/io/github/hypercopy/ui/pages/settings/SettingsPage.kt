@@ -15,7 +15,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.hypercopy.Config
@@ -62,6 +64,7 @@ fun SettingsPage(
     clipboardMonitorMode: ClipboardMonitorMode,
     jumpNotificationMode: JumpNotificationMode,
     copyDirectBrowserPackage: String,
+    copyDirectAdaptiveGrip: Boolean,
     onLogLevelChange: (Int) -> Unit,
     onAutoCheckUpdateChange: (Boolean) -> Unit,
     onHideFromRecentsChange: (Boolean) -> Unit,
@@ -72,6 +75,7 @@ fun SettingsPage(
     onAppLanguageChange: (AppLanguage) -> Unit,
     onJumpNotificationModeChange: (JumpNotificationMode) -> Unit,
     onCopyDirectBrowserChange: (String) -> Unit,
+    onCopyDirectAdaptiveGripChange: (Boolean) -> Unit,
     onCheckUpdate: () -> Unit,
     onOpenTheme: () -> Unit,
     onOpenAppList: () -> Unit,
@@ -138,6 +142,13 @@ fun SettingsPage(
                     startAction = { SettingsIcon(imageVector = MiuixIcons.Copy) },
                     insideMargin = SettingsItemMargin,
                     onSelectedIndexChange = { onCopyDirectBrowserChange(browserOptions[it].packageName) },
+                )
+                SwitchAction(
+                    icon = ImageVector.vectorResource(R.drawable.ic_adaptive_grip),
+                    title = stringResource(R.string.copy_direct_adaptive_grip),
+                    summary = stringResource(R.string.copy_direct_adaptive_grip_summary),
+                    checked = copyDirectAdaptiveGrip,
+                    onCheckedChange = { onCopyDirectAdaptiveGripChange(!copyDirectAdaptiveGrip) },
                 )
                 if (jumpNotificationMode == JumpNotificationMode.MiuiIsland && clipboardMonitorMode == ClipboardMonitorMode.Shizuku) {
                     SwitchAction(

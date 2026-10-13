@@ -85,6 +85,9 @@ public class HookEntry extends XposedModule {
     private final ConcurrentHashMap<String, PendingAicrTarget> aicrCueTargets = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Float> aicrCuePositions = new ConcurrentHashMap<>();
     private final Set<String> aicrCopyCueIds = ConcurrentHashMap.newKeySet();
+    private AicrBubbleGrip aicrBubbleGrip;
+    private ViewGroup aicrGripContainer;
+    private final ThreadLocal<Boolean> checkingAicrClipboardForClear = new ThreadLocal<>();
     private boolean clearReceiverRegistered = false;
 
     @Override
@@ -137,6 +140,8 @@ public class HookEntry extends XposedModule {
             getPrimaryClip.setAccessible(true);
             hook(getPrimaryClip).setId("hypercopy_aicr_get_primary_clip").intercept(chain -> {
                 Object result = chain.proceed();
+                // Checking the clipboard before a jump must not submit another copy-direct target.
+                if (Boolean.TRUE.equals(checkingAicrClipboardForClear.get())) return result;
                 if (!(result instanceof ClipData) || !shouldUseCustomJumpMode()) return result;
                 String clipboardText = firstClipText((ClipData) result);
                 if (!clipboardText.isEmpty()) {
@@ -258,7 +263,9 @@ public class HookEntry extends XposedModule {
         onLayout.setAccessible(true);
         hook(onLayout).setId("hypercopy_aicr_bubble_position").intercept(chain -> {
             positionAicrBubble(chain.getThisObject());
-            return chain.proceed();
+            Object result = chain.proceed();
+            updateAicrBubbleGrip(chain.getThisObject());
+            return result;
         });
         return hookCount + 1;
     }
@@ -309,14 +316,13 @@ public class HookEntry extends XposedModule {
     private void trackAicrCopyCuePositions(Object value) {
         if (!(value instanceof List)) return;
         float clickY = recentAicrClickY();
-        if (clickY < 0f) return;
         for (Object cue : (List<?>) value) {
             try {
                 if (cue == null || !"copy_jump".equals(invokeString(cue, "getCategory"))) continue;
                 String cueId = invokeString(cue, "getCueId");
                 if (cueId.isEmpty()) continue;
                 boolean added = aicrCopyCueIds.add(cueId);
-                aicrCuePositions.put(cueId, clickY);
+                if (clickY >= 0f) aicrCuePositions.put(cueId, clickY);
                 if (added) {
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
                         aicrCopyCueIds.remove(cueId);
@@ -346,6 +352,7 @@ public class HookEntry extends XposedModule {
                 clipboardText,
                 targetIntent,
                 targetPackage,
+                result.getBoolean(Config.EXTRA_AICR_CLEAR_CLIPBOARD_AFTER_JUMP, false),
                 System.currentTimeMillis() + AICR_TARGET_WINDOW_MILLIS
             );
         } catch (Throwable throwable) {
@@ -449,6 +456,7 @@ public class HookEntry extends XposedModule {
             Intent intent = new Intent(target.targetIntent)
                 .setPackage(target.targetPackage)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            clearAicrClipboardIfNeeded(target);
             aicrContext.startActivity(intent);
             logDebug("opened AICR copy-direct target: " + target.targetPackage);
             return true;
@@ -457,6 +465,25 @@ public class HookEntry extends XposedModule {
             return false;
         } finally {
             Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    private void clearAicrClipboardIfNeeded(PendingAicrTarget target) {
+        if (!target.clearClipboardAfterJump) return;
+        checkingAicrClipboardForClear.set(true);
+        try {
+            ClipboardManager clipboard = aicrContext.getSystemService(ClipboardManager.class);
+            // A previously shown bubble must not clear text copied after it was created.
+            if (clipboard == null || !target.sourceText.equals(firstClipText(clipboard.getPrimaryClip()))) {
+                logDebug("skip AICR clipboard clear: current text changed or unavailable");
+                return;
+            }
+            clipboard.clearPrimaryClip();
+            logDebug("cleared AICR copy-direct clipboard");
+        } catch (Throwable throwable) {
+            logWarn("clear AICR copy-direct clipboard failed", throwable);
+        } finally {
+            checkingAicrClipboardForClear.remove();
         }
     }
 
@@ -522,6 +549,38 @@ public class HookEntry extends XposedModule {
             } catch (Throwable throwable) {
                 logWarn("update AICR copy-direct cue failed", throwable);
             }
+        }
+    }
+
+    private void updateAicrBubbleGrip(Object value) {
+        if (!(value instanceof ViewGroup)) return;
+        ViewGroup container = (ViewGroup) value;
+        try {
+            List<View> bubbles = new ArrayList<>();
+            Method findHolder = container.getClass().getMethod("b", String.class);
+            for (String cueId : aicrCopyCueIds) {
+                Object holder = findHolder.invoke(container, cueId);
+                Object bubble = holder == null ? null : getPublicField(holder, "a");
+                if (bubble instanceof View) bubbles.add((View) bubble);
+            }
+            if (bubbles.isEmpty()) {
+                if (aicrGripContainer == container && aicrBubbleGrip != null) aicrBubbleGrip.dispose();
+                return;
+            }
+            if (aicrGripContainer != container || aicrBubbleGrip == null || aicrBubbleGrip.isDisposed()) {
+                if (aicrBubbleGrip != null) aicrBubbleGrip.dispose();
+                aicrGripContainer = container;
+                aicrBubbleGrip = new AicrBubbleGrip(container, getRemotePreferences(Config.PREFS_NAME), () -> {
+                    if (aicrGripContainer == container) {
+                        aicrBubbleGrip = null;
+                        aicrGripContainer = null;
+                    }
+                }, this::logDebug);
+            }
+            aicrBubbleGrip.onLayout(bubbles, (Integer) getPublicField(container, "d"));
+        } catch (Throwable throwable) {
+            if (aicrBubbleGrip != null) aicrBubbleGrip.dispose();
+            logWarn("update AICR copy-direct adaptive grip failed", throwable);
         }
     }
 
@@ -603,12 +662,14 @@ public class HookEntry extends XposedModule {
         private final String sourceText;
         private final Intent targetIntent;
         private final String targetPackage;
+        private final boolean clearClipboardAfterJump;
         private final long expiresAt;
 
-        private PendingAicrTarget(String sourceText, Intent targetIntent, String targetPackage, long expiresAt) {
+        private PendingAicrTarget(String sourceText, Intent targetIntent, String targetPackage, boolean clearClipboardAfterJump, long expiresAt) {
             this.sourceText = sourceText;
             this.targetIntent = targetIntent;
             this.targetPackage = targetPackage;
+            this.clearClipboardAfterJump = clearClipboardAfterJump;
             this.expiresAt = expiresAt;
         }
 
@@ -619,6 +680,7 @@ public class HookEntry extends XposedModule {
         private boolean sameTarget(PendingAicrTarget other) {
             return sourceText.equals(other.sourceText)
                 && targetIntent.filterEquals(other.targetIntent)
+                && clearClipboardAfterJump == other.clearClipboardAfterJump
                 && targetPackage.equals(other.targetPackage);
         }
     }

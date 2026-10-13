@@ -12,7 +12,7 @@ object MiuiSystemCopy {
     private const val EXPIRE_MILLIS = 10_000L
     private val targets = ConcurrentHashMap<String, Target>()
 
-    fun copy(context: Context, jump: PendingJump, originalText: String): Boolean {
+    fun copy(context: Context, jump: PendingJump, originalText: String, clearClipboardAfterJump: Boolean = false): Boolean {
         val source = originalText.trim()
         if (source.isEmpty() || jump.packageName.isBlank()) return false
         val resolvedIntent = when (jump) {
@@ -28,7 +28,7 @@ object MiuiSystemCopy {
 
         val now = System.currentTimeMillis()
         targets.entries.removeIf { it.value.expiresAt < now }
-        targets[source] = Target(intent, jump.packageName, now + EXPIRE_MILLIS)
+        targets[source] = Target(intent, jump.packageName, now + EXPIRE_MILLIS, clearClipboardAfterJump)
         HyperLog.d(TAG, "system copy-direct target cached for AICR")
         return true
     }
@@ -38,5 +38,5 @@ object MiuiSystemCopy {
         return target.takeIf { it.expiresAt >= System.currentTimeMillis() }
     }
 
-    data class Target(val intent: Intent, val packageName: String, val expiresAt: Long)
+    data class Target(val intent: Intent, val packageName: String, val expiresAt: Long, val clearClipboardAfterJump: Boolean)
 }
